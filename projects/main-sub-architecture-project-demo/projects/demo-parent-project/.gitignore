@@ -1,0 +1,15 @@
+# 🔴 子项目是独立嵌套仓库，整个 projects/ 不进父仓库
+# 理由：每个子项目是完整独立的仓库，可单独迁走 / 归档；代价是父仓库看不到子项目改动，
+# 而这正好就是「父级日志只记父级」这条纪律
+projects/
+
+# 跨项目授权放行条：一次性临时通行证，不进 git
+.claude/cross-edit-allow
+
+# Claude Code 的本机私有设置
+.claude/settings.local.json
+
+# 系统与编辑器杂物
+.DS_Store
+.idea/
+.vscode/

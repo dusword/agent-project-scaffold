@@ -1,0 +1,11 @@
+[project]
+name = "mini-wordcount"
+version = "0.1.0"
+description = "极简词频统计 —— 证明任意层级都能继续嵌套完整项目"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"

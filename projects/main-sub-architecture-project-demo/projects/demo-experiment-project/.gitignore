@@ -1,0 +1,19 @@
+# 跨项目授权放行条：一次性临时通行证，不进 git
+.claude/cross-edit-allow
+
+# Claude Code 的本机私有设置
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 🔴 实验产物：中间输出不进 git，但 experiments/data/ 下的样例数据要进
+#    （可复现是硬要求，样例数据是复现的一部分）
+experiments/out/
+*.log
+
+# 系统与编辑器杂物
+.DS_Store
+.idea/
+.vscode/
