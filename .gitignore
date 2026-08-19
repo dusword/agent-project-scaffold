@@ -1,0 +1,15 @@
+# 🔴 子项目是独立嵌套仓库，整个 projects/ 不进父仓库
+# 理由见 docs/00-架构规范.md §4
+projects/
+
+# 跨项目授权放行条：一次性临时通行证，不是配置，不进 git
+.claude/cross-edit-allow
+
+# Claude Code 的本机私有设置（各人不同，不共享）
+.claude/settings.local.json
+
+# 系统与编辑器杂物
+.DS_Store
+*.swp
+.idea/
+.vscode/
