@@ -1,26 +1,41 @@
 #!/usr/bin/env bash
 # ============================================================================
-# 提交硬闸 · pre-commit
+# 提交硬闸 · pre-commit（路径感知版 v2）
 # ----------------------------------------------------------------------------
-# 本仓库的两条纪律由这个钩子机器强制，不靠文字呼吁：
+# 本仓库的两条纪律由这个钩子机器强制，不靠文字呼吁。
+# v2 与旧版的唯一差别：所有判定从「整个仓库」下沉到「项目单元」，
+# 因此一个仓库里可以并排装多个项目，各自守各自的日志。
 #
-#   规则一（变更必留日志）：只要有任何非 CHANGE-LOG.md 的文件进入暂存区，
-#                          CHANGE-LOG.md 就必须一起进入暂存区，否则拒绝提交。
-#     └ 规则一之二（日志必须真的多一条）：CHANGE-LOG.md 光在暂存区里不算数，
-#                          它的暂存 diff 里「记录行」必须**净增加**至少一行，
-#                          否则拒绝。改写旧记录那一行 = 净增 0 = 不算。
-#   规则二（结构变化必更 README）：暂存区里若有 docs/ 或 projects/ 下的
-#                          新增 / 删除 / 改名，README.md 必须一起暂存，否则拒绝。
+#   项目单元 = 从一个文件所在目录向上找，最近的那个含 CLAUDE.md 的目录；
+#              一路找到顶都没有，就归「仓库根」这个单元。
+#              🔴 单元字典取自 git 索引（git ls-files），不看工作区 ——
+#                 本次新建的 CLAUDE.md 已经在索引里、本次删除的已经不在，
+#                 归属判定跟着「提交后的世界」走，而不是跟着硬盘现状走。
+#
+#   规则一（变更必留日志）：每个被动到的单元，它自己的 CHANGE-LOG.md 必须一起暂存。
+#     └ 规则一之二（日志必须真的多一条）：该单元 CHANGE-LOG.md 的暂存 diff 里
+#                          「记录行」必须净增加 >= 1。改写旧行 = +1/-1 = 净增 0 = 拒。
+#   规则二（结构变化必更 README）：某单元内 docs/ 或 projects/ 下有新增/删除/改名，
+#                          该单元的 README.md 必须一起暂存。
 #                          （只管结构变化，不管内容改动 —— 避免噪音）
+#
+# 🔴 一次提交允许同时动多个单元，但**每个被动到的单元都要各自补上自己的那行日志**。
+#    （不禁止跨单元提交：git mv 一个单元目录必然同时动到新旧两个单元，禁了就没法改名。）
+#
+# 🔴 在「一个项目 = 一个仓库」的单项目仓库里（只有根目录有 CLAUDE.md），
+#    所有文件都归「仓库根」这一个单元，本钩子的判定与旧版逐条等价。
 #
 # 启用方式（每个仓库各做一次）：
 #   git config core.hooksPath .githooks
 #
-# 诚实说明：
-#   · git 层面的 `--no-verify` 仍可绕过本钩子，这是 git 自身的设计，无法在钩子内堵死。
+# 诚实说明（别把它当铁桶）：
+#   · git 层面的 `--no-verify` 仍可绕过本钩子，这是 git 自身的设计，钩子内堵不死。
 #     本钩子的定位是「挡住忘记，而不是挡住蓄意」。
-#   · 规则一之二只**数**记录行有没有多一条，**不判断**你写的内容对不对、写得好不好。
-#     内容质量靠人工审阅，这里只保住「一条记录 = 一次提交」这个可数的不变量。
+#   · 规则一之二只**数**记录行有没有多一条，**不判断**你写得对不对、好不好。
+#   · 新建一个子单元时（它自己的 CLAUDE.md 跟着这次提交一起进索引），这批文件全部
+#     归**新单元**，不会触发父单元的规则一/规则二；反过来删除或改名子单元时，
+#     旧路径会归回父单元、并触发父单元的检查。父单元索引表在「新建」这个方向上
+#     靠纪律维护，不靠机器。
 # ============================================================================
 
 set -u
@@ -28,9 +43,11 @@ set -u
 repo_root="$(git rev-parse --show-toplevel)" || exit 1
 cd "$repo_root" || exit 1
 
+today="$(date +%Y-%m-%d)"
+
 # ---- 取暂存区变更（兼容首次提交：HEAD 尚不存在时与空树比较）----------------
 # 🔴 core.quotepath=false 不能省：git 默认把非 ASCII 路径转义成 "docs/\346\236\266..."，
-#    那样中文文件名既没法给人看，下面 ^docs/ 的前缀匹配也会因为多出来的引号而失效。
+#    那样中文文件名既没法给人看，下面的前缀匹配也会因为多出来的引号而失效。
 if git rev-parse --verify -q HEAD >/dev/null 2>&1; then
   diff_base="HEAD"
 else
@@ -43,7 +60,7 @@ if [ -z "$changes" ]; then
   exit 0
 fi
 
-# ---- 展开成「状态 + 路径」两列；改名一行拆成新旧两条 ------------------------
+# ---- 展开成「状态 + 路径」两列；改名/复制一行拆成新旧两条 --------------------
 # 输出格式：<状态字母>\t<路径>
 flat="$(printf '%s\n' "$changes" | awk -F'\t' '
   function unq(p) {                      # 兜底：仍被 git 加了引号的路径去掉首尾引号
@@ -51,6 +68,7 @@ flat="$(printf '%s\n' "$changes" | awk -F'\t' '
       p = substr(p, 2, length(p) - 2)
     return p
   }
+  $0 == "" { next }
   {
     st = substr($1, 1, 1)
     if (st == "R" || st == "C") {
@@ -62,110 +80,190 @@ flat="$(printf '%s\n' "$changes" | awk -F'\t' '
   }
 ')"
 
-staged_paths="$(printf '%s\n' "$flat" | cut -f2 | sort -u)"
+# ---- 单元根字典：git 索引里所有 CLAUDE.md 所在的目录 ------------------------
+# 用 git ls-files 而不是 find：索引才代表「这次提交之后的世界」。
+# 仓库根用 "." 表示，并且**无条件放进字典** —— 它既是找不到时的兜底单元，
+# 也保证下面 awk 两遍扫描的第一份输入永远非空。
+# 🔴 为什么在意这个：NR==FNR 这个写法在「第一份输入是零字节」时会把**整份**
+#    第二份输入都当成字典吃掉，于是变更表变成空的、钩子一路放行 —— 硬闸失效
+#    还不报错。所以这里既塞 "."，下面也用 printf 保证结尾有换行，双保险。
+unit_dirs="$( { printf '.\n'
+  git -c core.quotepath=false ls-files -- 'CLAUDE.md' '*/CLAUDE.md' | awk '
+    $0 == "" { next }
+    { d = $0; sub(/\/?CLAUDE\.md$/, "", d); if (d == "") d = "."; print d }
+  '
+} | sort -u )"
 
-changelog_staged=0
-readme_staged=0
-other_staged=0
+# ---- 给每条变更打上单元标签：<状态>\t<单元根>\t<路径> -----------------------
+# 🔴 用 awk 两遍扫描（先吃单元字典、再吃变更表）一次算完，
+#    不能每个文件开一次子进程去 dirname/grep —— 300 个文件那样要 fork 上千次。
+tagged="$(awk -F'\t' '
+  NR==FNR { if ($0 != "") unit[$0] = 1; next }
+  $0 == "" { next }
+  {
+    p = $2; d = p
+    if (sub(/\/[^\/]*$/, "", d) == 0) d = "."
+    while (1) {
+      if (d in unit) break
+      if (d == ".") break
+      if (sub(/\/[^\/]*$/, "", d) == 0) d = "."
+    }
+    print $1 "\t" d "\t" p
+  }
+' <(printf '%s\n' "$unit_dirs") <(printf '%s\n' "$flat"))"
 
-while IFS= read -r p; do
-  [ -z "$p" ] && continue
-  case "$p" in
-    CHANGE-LOG.md) changelog_staged=1 ;;
-    # 🔴 README.md 同时置 other_staged：它也是「非 CHANGE-LOG.md 的文件」，
-    #    只改 README 也必须留日志。漏了这一句，规则一对纯 README 改动整个失效。
-    README.md)     readme_staged=1; other_staged=1 ;;
-    *)             other_staged=1 ;;
-  esac
-done <<EOF
-$staged_paths
-EOF
+# 🔴 失效必须是「拒绝」而不是「放行」：万一归属算错、tagged 空了，
+#    下面按单元循环会一次都不进、fail 保持 0，硬闸就静悄悄地形同虚设。
+#    宁可在这里炸出来，也不要装作检查过了。
+if [ -z "$tagged" ]; then
+  {
+    echo ""
+    echo "❌ 提交被拒绝：钩子没能把这次的变更归到任何项目单元（这不该发生）"
+    echo ""
+    echo "   暂存区确实有变更，但内部归属表算出来是空的 —— 说明钩子本身出了问题。"
+    echo "   请把下面这段贴给维护者，然后再决定要不要提交："
+    printf '%s\n' "$changes" | sed 's/^/     /'
+    echo ""
+  } >&2
+  exit 1
+fi
+
+units_touched="$(printf '%s\n' "$tagged" | cut -f2 | grep -v '^$' | sort -u)"
 
 fail=0
+failed_units=0
+report=""          # 分单元的报错正文，攒齐了最后一次性输出
+fix_cmd=""         # 可直接复制的 git add 补救路径
 
-# ---- 规则一：变更必留日志 --------------------------------------------------
-if [ "$other_staged" -eq 1 ] && [ "$changelog_staged" -eq 0 ]; then
-  fail=1
-  echo "" >&2
-  echo "❌ 提交被拒绝：本次改动没有记进 CHANGE-LOG.md" >&2
-  echo "" >&2
-  echo "   本仓库的铁律是「任何改动都要留下一行日志」。" >&2
-  echo "   当前暂存的文件里没有 CHANGE-LOG.md：" >&2
-  printf '%s\n' "$staged_paths" | sed 's/^/     · /' >&2
-  echo "" >&2
-  echo "   补救（三步）：" >&2
-  echo "     1) 打开 CHANGE-LOG.md，在表格最上方插入一行：" >&2
-  echo "        | $(date +%Y-%m-%d) | <改了什么> | <为什么> |" >&2
-  echo "     2) git add CHANGE-LOG.md" >&2
-  echo "     3) git commit  （重新执行你刚才那条提交命令）" >&2
-  echo "" >&2
-  echo "   注意：本闸门没有跳过开关。请补日志，不要找绕路。" >&2
-  echo "" >&2
-fi
+# ---- 逐个单元判定 ----------------------------------------------------------
+while IFS= read -r unit; do
+  [ -z "$unit" ] && continue
 
-# ---- 规则一之二：CHANGE-LOG.md 必须真的**新增**了一条记录 -------------------
-# 为什么要有这一条：只查「在不在暂存区」挡不住「写坏了日志」。
-# 实测事故：会话用 Edit 改日志时，把这次的说明揉进了**上一条记录那一行**——
-# 文件确实变了、也确实暂存了，闸门照常放行，最终 5 次提交对 4 行记录，
-# 「一条记录 = 一次提交」当场破功，全程零告警。
-#
-# 判据：记录行 = 首格是日期（YYYY-M-D）的表格行。这样表头行 `| 日期 | … |`
-# 与 `|---|---|` 分隔行天然被排除，不必额外特判。
-# 用「净增加」（新增行数 > 删除行数）而不是「有没有新增行」，是因为改写旧行
-# 在 diff 里同样表现为一加一减——只有净增才说明真的多了一条记录。
-if [ "$changelog_staged" -eq 1 ]; then
-  cl_diff="$(git diff --cached -U0 "$diff_base" -- CHANGE-LOG.md)"
-  cl_added="$(printf '%s\n' "$cl_diff" | grep -cE '^[+][|][^|]*[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}')"
-  cl_removed="$(printf '%s\n' "$cl_diff" | grep -cE '^[-][|][^|]*[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}')"
-
-  if [ "$cl_added" -le "$cl_removed" ]; then
-    fail=1
-    echo "" >&2
-    echo "❌ 提交被拒绝：CHANGE-LOG.md 改了，但没有**新增**一条记录" >&2
-    echo "" >&2
-    echo "   本仓库的铁律是「一条记录 = 一次 git 提交」。" >&2
-    echo "   本次 CHANGE-LOG.md 的暂存 diff：新增记录行 ${cl_added} 条 / 删除记录行 ${cl_removed} 条" >&2
-    echo "   → 净增 0 条，等于这次提交在日志里找不到对应的那一行。" >&2
-    echo "" >&2
-    echo "   最常见的原因：**把这次的说明改写进了上一条记录那一行**，而不是另起一行。" >&2
-    echo "   🔴 改旧行不算新增。旧记录是已经发生过的历史，不该被这次改动覆盖。" >&2
-    echo "" >&2
-    echo "   记录行长这样（新的加在表格最上方，一次提交一行）：" >&2
-    echo "     | $(date +%Y-%m-%d) | <改了什么> | <为什么> |" >&2
-    echo "" >&2
-    echo "   补救（三步）：" >&2
-    echo "     1) 打开 CHANGE-LOG.md，在表头下面**另起一行**写本次记录，别动上一条" >&2
-    echo "     2) git add CHANGE-LOG.md" >&2
-    echo "     3) git commit  （重新执行你刚才那条提交命令）" >&2
-    echo "" >&2
-    echo "   注意：本闸门没有跳过开关。它只数记录行有没有多一条，不看你写得好不好。" >&2
-    echo "" >&2
+  if [ "$unit" = "." ]; then
+    pre=""
+    unit_label="仓库根"
+  else
+    pre="${unit}/"
+    unit_label="$unit"
   fi
-fi
+  cl_path="${pre}CHANGE-LOG.md"
+  rd_path="${pre}README.md"
 
-# ---- 规则二：结构变化必更 README -------------------------------------------
-structural="$(printf '%s\n' "$flat" | awk -F'\t' '
-  $1 ~ /^[ADRC]$/ && ($2 ~ /^docs\// || $2 ~ /^projects\//) { print $1 "\t" $2 }
-')"
+  unit_paths="$(printf '%s\n' "$tagged" | awk -F'\t' -v U="$unit" '$2 == U { print $3 }' | sort -u)"
 
-if [ -n "$structural" ] && [ "$readme_staged" -eq 0 ]; then
-  fail=1
-  echo "" >&2
-  echo "❌ 提交被拒绝：docs/ 或 projects/ 的结构变了，但 README.md 没有同步" >&2
-  echo "" >&2
-  echo "   README.md 是本仓库对外（尤其是对 AI agent）的目录索引，" >&2
-  echo "   结构一变就必须同步，否则索引会悄悄失真。" >&2
-  echo "" >&2
-  echo "   触发本条的结构变化（A=新增 D=删除 R=改名 C=复制）：" >&2
-  printf '%s\n' "$structural" | awk -F'\t' '{print "     · [" $1 "] " $2}' >&2
-  echo "" >&2
-  echo "   补救（三步）：" >&2
-  echo "     1) 打开 README.md，把上面这些条目在索引表里加/删/改名" >&2
-  echo "     2) git add README.md" >&2
-  echo "     3) git commit  （重新执行你刚才那条提交命令）" >&2
-  echo "" >&2
-  echo "   说明：只有新增/删除/改名会触发本条；改内容不触发，避免噪音。" >&2
-  echo "" >&2
+  changelog_staged=0
+  readme_staged=0
+  other_staged=0
+
+  while IFS= read -r p; do
+    [ -z "$p" ] && continue
+    case "$p" in
+      "$cl_path") changelog_staged=1 ;;
+      # 🔴 README.md 同时置 other_staged：它也是「非 CHANGE-LOG.md 的文件」，
+      #    只改 README 也必须留日志。漏了这一句，规则一对纯 README 改动整个失效。
+      "$rd_path") readme_staged=1; other_staged=1 ;;
+      *)          other_staged=1 ;;
+    esac
+  done <<EOF_PATHS
+$unit_paths
+EOF_PATHS
+
+  unit_fail=0
+  unit_body=""
+
+  # ---- 规则一：本单元的变更必留本单元的日志 --------------------------------
+  if [ "$other_staged" -eq 1 ] && [ "$changelog_staged" -eq 0 ]; then
+    unit_fail=1
+    fix_cmd="${fix_cmd} ${cl_path}"
+    unit_body="${unit_body}      ❌ 缺日志：${cl_path} 没有跟着一起暂存
+         这次动到本单元的文件：
+$(printf '%s\n' "$unit_paths" | awk 'NF { n++; if (n<=12) print "           · " $0 } END { if (n>12) print "           …（共 " n " 个，只列前 12 个）" }')
+         补法：打开 ${cl_path}，在表格最上方**另起一行**：
+           | ${today} | <改了什么> | <为什么> |
+"
+  fi
+
+  # ---- 规则一之二：本单元 CHANGE-LOG.md 必须真的**新增**了一条记录 ---------
+  # 为什么要有这一条：只查「在不在暂存区」挡不住「写坏了日志」。
+  # 实测事故：会话用 Edit 改日志时把这次的说明揉进了**上一条记录那一行**——
+  # 文件确实变了、也确实暂存了，闸门照常放行，最终 5 次提交对 4 行记录。
+  # 判据：记录行 = 首格是日期（YYYY-M-D）的表格行；表头行与 |---| 分隔行天然被排除。
+  # 用「净增加」而不是「有没有新增行」，是因为改写旧行在 diff 里同样是一加一减。
+  if [ "$changelog_staged" -eq 1 ]; then
+    cl_diff="$(git diff --cached -U0 "$diff_base" -- "$cl_path")"
+    cl_added="$(printf '%s\n' "$cl_diff" | grep -cE '^[+][|][^|]*[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}')"
+    cl_removed="$(printf '%s\n' "$cl_diff" | grep -cE '^[-][|][^|]*[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}')"
+
+    if [ "$cl_added" -le "$cl_removed" ]; then
+      unit_fail=1
+      fix_cmd="${fix_cmd} ${cl_path}"
+      unit_body="${unit_body}      ❌ 日志没有净增一条：${cl_path}
+         本次暂存 diff：新增记录行 ${cl_added} 条 / 删除记录行 ${cl_removed} 条 → 净增 0 条，
+         等于这次提交在这个单元的日志里找不到对应的那一行。
+         最常见的原因：**把这次的说明改写进了上一条记录那一行**，而不是另起一行。
+         🔴 改旧行不算新增。旧记录是已经发生过的历史，不该被这次改动覆盖。
+         补法：在表头下面**另起一行**写本次记录，别动上一条：
+           | ${today} | <改了什么> | <为什么> |
+"
+    fi
+  fi
+
+  # ---- 规则二：本单元的结构变化必更本单元的 README --------------------------
+  # 只看这个单元自己的 docs/ 与 projects/：子单元目录里的文件已经归了子单元，
+  # 不会串到父单元这边来。
+  structural="$(printf '%s\n' "$tagged" | awk -F'\t' -v U="$unit" -v P="$pre" '
+    $2 == U && $1 ~ /^[ADRC]$/ {
+      rel = $3
+      if (P != "") {
+        if (index(rel, P) != 1) next
+        rel = substr(rel, length(P) + 1)
+      }
+      if (rel ~ /^docs\// || rel ~ /^projects\//) print $1 "\t" rel
+    }
+  ')"
+
+  if [ -n "$structural" ] && [ "$readme_staged" -eq 0 ]; then
+    unit_fail=1
+    fix_cmd="${fix_cmd} ${rd_path}"
+    unit_body="${unit_body}      ❌ 结构变了但索引没同步：${rd_path} 没有跟着一起暂存
+         README.md 是这个单元对外（尤其是对 AI agent）的目录索引，
+         结构一变就必须同步，否则索引会悄悄失真。
+         触发本条的结构变化（A=新增 D=删除 R=改名 C=复制，路径相对单元根）：
+$(printf '%s\n' "$structural" | awk -F'\t' 'NF { n++; if (n<=12) print "           · [" $1 "] " $2 } END { if (n>12) print "           …（共 " n " 条，只列前 12 条）" }')
+         补法：打开 ${rd_path}，把上面这些条目在索引表里加 / 删 / 改名。
+         （只有新增/删除/改名会触发本条；改内容不触发，避免噪音。）
+"
+  fi
+
+  if [ "$unit_fail" -eq 1 ]; then
+    fail=1
+    failed_units=$((failed_units + 1))
+    report="${report}   ── 单元【${unit_label}】 ──────────────────────────────
+${unit_body}
+"
+  fi
+done <<EOF_UNITS
+$units_touched
+EOF_UNITS
+
+# ---- 出报告 ----------------------------------------------------------------
+if [ "$fail" -eq 1 ]; then
+  {
+    echo ""
+    echo "❌ 提交被拒绝：有 ${failed_units} 个项目单元没有守住提交纪律"
+    echo ""
+    echo "   本仓库一个仓库里装着多个「项目单元」。"
+    echo "   单元 = 从改动文件向上找到的最近一个含 CLAUDE.md 的目录（找不到就算仓库根）。"
+    echo "   一次提交可以同时动多个单元，但**每个被动到的单元都要各自留下自己的那行日志**。"
+    echo ""
+    printf '%s' "$report"
+    echo "   一次性补救（把内容补好之后，这条可以直接复制）："
+    echo "     git add$(printf '%s\n' "$fix_cmd" | tr ' ' '\n' | grep -v '^$' | sort -u | awk '{ printf " " $0 }')"
+    echo "     git commit   （重新执行你刚才那条提交命令）"
+    echo ""
+    echo "   注意：本闸门没有跳过开关。请补日志，不要找绕路。"
+    echo ""
+  } >&2
 fi
 
 exit "$fail"
